@@ -7,7 +7,7 @@ from pyro.infer.elbo import ELBO
 from pyro.infer.enum import get_importance_trace
 from pyro.infer.util import is_validation_enabled
 from pyro.poutine.util import prune_subsample_sites
-from pyro.util import check_if_enumerated, check_model_guide_match, warn_if_nan
+from pyro.util import check_if_enumerated
 
 
 class PMHEM(ELBO):
@@ -38,7 +38,7 @@ class PMHEM(ELBO):
         self,
         num_particles=1,
         model_has_params=True,
-        vectorize_particles=True,
+        vectorize_particles=False,
         max_plate_nesting=float("inf"),
         num_updates=1):
         super().__init__(
@@ -82,7 +82,7 @@ class PMHEM(ELBO):
         """
         Get model and guide traces and calculate their probabilities.
         """
-        model_traces, guide_traces = zip(*self._get_traces(model, guide, args, kwargs))
+        model_traces, guide_traces = tuple(map(list, zip(*self._get_traces(model, guide, args, kwargs))))
 
         log_weights = []
 
@@ -100,7 +100,7 @@ class PMHEM(ELBO):
         for n, (trace, log_weight, new_trace, new_log_weight) in \
                 enumerate(zip(self.traces, self.log_weights, new_traces, new_log_weights)):
             if log_weight.numel() <= 1:
-                if torch.rand() <= (new_log_weight - log_weight).clamp(max=0).exp():
+                if torch.rand(1) <= (new_log_weight - log_weight).clamp(max=0).exp():
                     self.traces[n] = new_trace
                     self.log_weights[n] = new_log_weight
             else:
