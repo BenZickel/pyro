@@ -204,3 +204,71 @@ class Stable(TorchDistribution):
     def variance(self):
         var = self.scale * self.scale
         return var.mul(2).masked_fill(self.stability < 2, math.inf)
+
+
+class StableGivenUniform(TorchDistribution):
+    r"""
+    Stable distribution given the value of the uniformaly distributed auxiliary
+    variable of the CMS procedure.
+
+    :param Tensor stability: Levy stability parameter :math:`\alpha\in(0,2]` .
+    :param Tensor skew: Skewness :math:`\beta\in[-1,1]` .
+    :param Tensor scale: Scale :math:`\sigma > 0` . Defaults to 1.
+    :param Tensor loc: Location :math:`\mu_0` when using Nolan's S0
+        parametrization [2], or :math:`\mu` when using the S parameterization.
+        Defaults to 0.
+    :param: Tensor u: Uniformaly distributed auxiliary variable of the
+        CMS procedure :math:`U\in(-\pi/2,\pi/2)` .
+    :param str coords: Either "S0" (default) to use Nolan's continuous S0
+        parametrization, or "S" to use the discontinuous parameterization.
+    """
+
+    has_rsample = True
+    arg_constraints = {
+        "stability": constraints.interval(0, 2),  # half-open (0, 2]
+        "skew": constraints.interval(-1, 1),  # closed [-1, 1]
+        "scale": constraints.positive,
+        "loc": constraints.real,
+        "u": constraints.interval(-math.pi / 2, math.pi / 2)
+    }
+    support = constraints.real
+
+    def __init__(
+        self, stability, skew, scale=1.0, loc=0.0, u=0.0, coords="S0", validate_args=None
+    ):
+        assert coords in ("S", "S0"), coords
+        self.stability, self.skew, self.scale, self.loc, self.u = broadcast_all(
+            stability, skew, scale, loc, u
+        )
+        self.coords = coords
+        super().__init__(self.loc.shape, validate_args=validate_args)
+
+    def expand(self, batch_shape, _instance=None):
+        new = self._get_checked_instance(Stable, _instance)
+        batch_shape = torch.Size(batch_shape)
+        for name in self.arg_constraints:
+            setattr(new, name, getattr(self, name).expand(batch_shape))
+        new.coords = self.coords
+        super(Stable, new).__init__(batch_shape, validate_args=False)
+        new._validate_args = self._validate_args
+        return new
+
+    def log_prob(self, value):
+        raise NotImplementedError("StableGivenUniform.log_prob() is not implemented")
+
+    def rsample(self, sample_shape=torch.Size()):
+        # Draw parameter-free noise.
+        with torch.no_grad():
+            shape = self._extended_shape(sample_shape)
+            new_empty = self.stability.new_empty
+            aux_uniform = self.u
+            aux_exponential = new_empty(shape).exponential_()
+
+        # Match dimensions of preset noise and drawn noise.
+        aux_uniform, aux_exponential = broadcast_all(aux_uniform, aux_exponential)
+
+        # Differentiably transform.
+        x = _standard_stable(
+            self.stability, self.skew, aux_uniform, aux_exponential, coords=self.coords
+        )
+        return self.loc + self.scale * x
