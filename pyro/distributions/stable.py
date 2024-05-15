@@ -3,6 +3,8 @@
 
 import math
 
+from dataclasses import dataclass
+
 import torch
 from torch.distributions import constraints
 from torch.distributions.utils import broadcast_all
@@ -208,8 +210,8 @@ class Stable(TorchDistribution):
 
 class StableGivenUniform(TorchDistribution):
     r"""
-    Stable distribution given the value of the uniformaly distributed auxiliary
-    variable of the CMS procedure.
+    Stable distribution given the value of the uniformaly distributed reparametrized
+    auxiliary variable of the CMS procedure.
 
     :param Tensor stability: Levy stability parameter :math:`\alpha\in(0,2]` .
     :param Tensor skew: Skewness :math:`\beta\in[-1,1]` .
@@ -217,28 +219,34 @@ class StableGivenUniform(TorchDistribution):
     :param Tensor loc: Location :math:`\mu_0` when using Nolan's S0
         parametrization [2], or :math:`\mu` when using the S parameterization.
         Defaults to 0.
-    :param: Tensor u: Uniformaly distributed auxiliary variable of the
-        CMS procedure :math:`U\in(-\pi/2,\pi/2)` .
+    :param: Tensor u_low: Uniformaly distributed auxiliary variable of the
+        modified CMS procedure :math:`U \in (0,1)` .
+    :param: Tensor u_mid: Uniformaly distributed auxiliary variable of the
+        modified CMS procedure :math:`U \in (0,1)` .
+    :param: Tensor u_high: Uniformaly distributed auxiliary variable of the
+        modified CMS procedure :math:`U \in (0,1)` .
     :param str coords: Either "S0" (default) to use Nolan's continuous S0
         parametrization, or "S" to use the discontinuous parameterization.
     """
 
-    has_rsample = True
+    has_rsample = False
     arg_constraints = {
         "stability": constraints.interval(0, 2),  # half-open (0, 2]
         "skew": constraints.interval(-1, 1),  # closed [-1, 1]
         "scale": constraints.positive,
         "loc": constraints.real,
-        "u": constraints.interval(-math.pi / 2, math.pi / 2)
+        "u_low": constraints.interval(0, 1),
+        "u_mid": constraints.interval(0, 1),
+        "u_high": constraints.interval(0, 1)
     }
     support = constraints.real
 
     def __init__(
-        self, stability, skew, scale=1.0, loc=0.0, u=0.0, coords="S0", validate_args=None
+        self, stability, skew, scale=1.0, loc=0.0, u_low=0.0, u_mid=0.0, u_high=0.0, coords="S0", validate_args=None
     ):
         assert coords in ("S", "S0"), coords
-        self.stability, self.skew, self.scale, self.loc, self.u = broadcast_all(
-            stability, skew, scale, loc, u
+        self.stability, self.skew, self.scale, self.loc, self.u_low, self.u_mid, self.u_high = broadcast_all(
+            stability, skew, scale, loc, u_low, u_mid, u_high
         )
         self.coords = coords
         super().__init__(self.loc.shape, validate_args=validate_args)
@@ -254,21 +262,112 @@ class StableGivenUniform(TorchDistribution):
         return new
 
     def log_prob(self, value):
-        raise NotImplementedError("StableGivenUniform.log_prob() is not implemented")
+        # Auxiliary calculations
+        aux = _unsafe_stable_given_uniform_aux_calc(self.stability, self.skew)
 
-    def rsample(self, sample_shape=torch.Size()):
+        # Undo shift and scale
+        value = (value - self.loc) / self.scale
+        
+        log_prob = -math.inf * torch.ones(value.shape)
+        for n, (idx, bias, u) in enumerate(
+                [(value < aux.shift, -0.5 * math.pi * torch.ones(aux.u_zero.shape), self.u_low),
+                 (torch.logical_xor(value > aux.shift, aux.u_zero > 0), aux.u_min, self.u_mid),
+                 (value > aux.shift, aux.u_max, self.u_high)]):
+            u = (aux.probs[..., n] * u)[idx] * math.pi + bias[idx]
+            partial_log_prob, W = _unsafe_stable_given_uniform_logprob(self.stability[idx], self.skew[idx], u, value[idx], self.coords)
+            log_prob[idx] = torch.logsumexp(torch.stack((log_prob[idx],
+                                                         aux.probs[..., n][idx].log(),
+                                                         partial_log_prob), dim=0), dim=0)
+
+        if torch.isnan(log_prob).any():
+            raise
+
+        return log_prob - self.scale.log()
+
+    def sample(self, sample_shape=torch.Size()):
         # Draw parameter-free noise.
         with torch.no_grad():
             shape = self._extended_shape(sample_shape)
-            new_empty = self.stability.new_empty
-            aux_uniform = self.u
-            aux_exponential = new_empty(shape).exponential_()
+            aux_exponential = self.stability.new_empty(shape).exponential_()
 
         # Match dimensions of preset noise and drawn noise.
-        aux_uniform, aux_exponential = broadcast_all(aux_uniform, aux_exponential)
+        u_low, u_mid, u_high, aux_exponential = broadcast_all(self.u_low, self.u_mid, self.u_high, aux_exponential)
 
+        # Auxiliary calculations
+        aux = _unsafe_stable_given_uniform_aux_calc(self.stability, self.skew)
+        
+        # Select range for auxiliary variable
+        interval = torch.distributions.Categorical(aux.probs).sample()
+
+        aux_uniform = torch.zeros(aux_exponential.shape)
+        for n, (bias, u) in enumerate([(-0.5 * math.pi * torch.ones(aux.u_zero.shape), u_low),
+                                       (aux.u_min, u_mid),
+                                       (aux.u_max, u_high)]):
+            idx = interval == n
+            aux_uniform[idx] = (aux.probs[..., n] * u)[idx] * math.pi + bias[idx]
+            
         # Differentiably transform.
         x = _standard_stable(
             self.stability, self.skew, aux_uniform, aux_exponential, coords=self.coords
         )
         return self.loc + self.scale * x
+
+
+@dataclass(frozen=True, eq=False)
+class _unsafe_stable_given_uniform_aux_calc_results():
+    u_zero: torch.Tensor
+    u_zero_complement: torch.Tensor
+    shift: torch.Tensor
+    u_min: torch.Tensor
+    u_max: torch.Tensor
+    probs: torch.Tensor
+
+
+def _unsafe_stable_given_uniform_aux_calc(alpha, beta):
+    ha = math.pi / 2 * alpha
+    b = beta * ha.tan()
+    atan_b = b.atan()
+    shift = -b
+    u_zero = -alpha.reciprocal() * atan_b
+    u_zero_complement = (2 - alpha).reciprocal() * atan_b
+    u_all = torch.stack((u_zero, u_zero_complement), dim=0)
+    u_min = u_all.min(dim=0).values
+    u_max = u_all.max(dim=0).values
+    probs = torch.stack((0.5 + u_min / math.pi,
+                            (u_max - u_min) / math.pi,
+                            0.5 - u_max / math.pi), dim=-1)
+    return _unsafe_stable_given_uniform_aux_calc_results(u_zero, u_zero_complement, shift,
+                                                         u_min, u_max, probs)
+
+
+def _unsafe_stable_given_uniform_logprob(alpha, beta, V, Z, coords):
+    # Calculate log-probability of Z given V. This will fail if alpha is close to 1.
+
+    # Differentiably transform noise via parameters.
+    assert V.shape == Z.shape
+    inv_alpha = alpha.reciprocal()
+    half_pi = math.pi / 2
+    eps = torch.finfo(V.dtype).eps
+    # make V belong to the open interval (-pi/2, pi/2)
+    V = V.clamp(min=2 * eps - half_pi, max=half_pi - 2 * eps)
+    ha = half_pi * alpha
+    b = beta * ha.tan()
+
+    # Optionally convert from Nolan's parametrization S^0 where samples depend
+    # continuously on (alpha,beta), allowing interpolation around the hole at
+    # alpha=1.
+    if coords == "S0":
+        Z = Z + b
+    elif coords != "S":
+        raise ValueError("Unknown coords: {}".format(coords))
+    
+    # +/- `ha` term to keep the precision of alpha * (V + half_pi) when V ~ -half_pi
+    v = b.atan() - ha + alpha * (V + half_pi)
+    W = ( ( v.sin() / Z /
+           ((1 + b * b).rsqrt() * V.cos()).pow(inv_alpha)
+          ).pow(alpha / (1 - alpha))
+          * (v - V).cos().clamp(min=eps) 
+        )
+    
+    return -W + (alpha * W / Z / (alpha - 1)).abs().log(), W
+    
