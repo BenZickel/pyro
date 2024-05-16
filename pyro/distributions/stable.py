@@ -389,6 +389,7 @@ def _unsafe_stable_given_uniform_logprob(alpha, beta, V, Z, coords):
     
     # +/- `ha` term to keep the precision of alpha * (V + half_pi) when V ~ -half_pi
     v = b.atan() - ha + alpha * (V + half_pi)
+    
     W = ( ( v.sin() / Z /
            ((1 + b * b).rsqrt() * V.cos()).pow(inv_alpha)
           ).pow(alpha / (1 - alpha))
@@ -396,4 +397,12 @@ def _unsafe_stable_given_uniform_logprob(alpha, beta, V, Z, coords):
         )
     
     return -W + (alpha * W / Z / (alpha - 1)).abs().log(), W
+
+    '''
+    log_Z = Z.abs().log()
+    log_W = alpha / (1 - alpha) * (v.sin().abs().log() - log_Z) - \
+            1 / (1 - alpha) * ((1 + b * b).rsqrt().log() + V.cos().abs().log()) + \
+            (v - V).cos().clamp(min=eps).log()
     
+    return -W + log_W - log_Z + (alpha / (alpha - 1)).abs().log(), W
+    '''
