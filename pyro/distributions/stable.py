@@ -177,7 +177,33 @@ class Stable(TorchDistribution):
         return new
 
     def log_prob(self, value):
-        raise NotImplementedError("Stable.log_prob() is not implemented")
+        # Auxiliary calculations
+        aux = _unsafe_stable_given_uniform_aux_calc(self.stability, self.skew)
+
+        # Undo shift and scale
+        value = (value - self.loc) / self.scale
+        
+        N = 500
+
+        log_prob = -math.inf * torch.ones(value.shape)
+        for n, (idx, bias) in enumerate(
+                [(value < aux.shift, -0.5 * math.pi * torch.ones(aux.u_zero.shape)),
+                 (torch.logical_xor(value > aux.shift, aux.u_zero > 0), aux.u_min),
+                 (value > aux.shift, aux.u_max)]):
+            u = torch.arange(1, N + 1) / (N + 1)
+            u = u[[None] * len(value[idx].shape) + [slice(None)]]
+            alpha, beta, u, v, probs, bias = broadcast_all(self.stability[idx][..., None],
+                                                           self.skew[idx][..., None], u,
+                                                           value[idx][..., None],
+                                                           aux.probs[..., n][idx][..., None],
+                                                           bias[idx][..., None])
+            u = (probs * u) * math.pi + bias
+            partial_log_prob, W = _unsafe_stable_given_uniform_logprob(alpha, beta, u, v, self.coords)
+            partial_log_prob = torch.logsumexp(partial_log_prob, dim = -1) + aux.probs[..., n][idx].log()
+            log_prob[idx] = torch.logsumexp(torch.stack((log_prob[idx],
+                                                         partial_log_prob), dim=0), dim=0)
+
+        return log_prob - self.scale.log() - torch.tensor(N).log()
 
     def rsample(self, sample_shape=torch.Size()):
         # Draw parameter-free noise.
@@ -275,8 +301,8 @@ class StableGivenUniform(TorchDistribution):
                  (value > aux.shift, aux.u_max, self.u_high)]):
             u = (aux.probs[..., n] * u)[idx] * math.pi + bias[idx]
             partial_log_prob, W = _unsafe_stable_given_uniform_logprob(self.stability[idx], self.skew[idx], u, value[idx], self.coords)
+            partial_log_prob = partial_log_prob + aux.probs[..., n][idx].log()
             log_prob[idx] = torch.logsumexp(torch.stack((log_prob[idx],
-                                                         aux.probs[..., n][idx].log(),
                                                          partial_log_prob), dim=0), dim=0)
 
         if torch.isnan(log_prob).any():
