@@ -99,13 +99,14 @@ def _stable_log_prob(alpha, beta, value, coords):
     return log_prob
 
 
-def _unsafe_alpha_stable_log_prob_S0(alpha, beta, Z):
-    # Calculate log-probability of Z in Nolan's parametrization S^0. This will fail if alpha is close to 1
+def _unsafe_alpha_stable_log_prob_S0(alpha, beta, Z0):
+    # Calculate log-probability of Z0 in Nolan's parametrization S^0. This will fail if alpha is close to 1
 
     # Convert from Nolan's parametrization S^0 where samples depend
     # continuously on (alpha,beta), allowing interpolation around the hole at
     # alpha=1.
-    Z = Z + beta * (math.pi / 2 * alpha).tan()
+    shift = beta * (math.pi / 2 * alpha).tan()
+    Z = Z0 + shift
 
     # Find near zero values
     per_alpha_value_near_zero_tolerance = (
@@ -121,17 +122,17 @@ def _unsafe_alpha_stable_log_prob_S0(alpha, beta, Z):
     # Handle near zero values by interpolation
     if idx.any():
         log_prob_pos = log_prob[idx]
+        log_prob_zero = _unsafe_alpha_stable_log_prob_at_zero(alpha[idx], beta[idx])
         log_prob_neg = _unsafe_stable_log_prob(
             alpha[idx], beta[idx], -per_alpha_value_near_zero_tolerance[idx]
         )
-        weights = Z[idx] / (2 * per_alpha_value_near_zero_tolerance[idx]) + 0.5
-        log_prob[idx] = torch.logsumexp(
-            torch.stack(
-                (log_prob_pos + weights.log(), log_prob_neg + (1 - weights).log()),
-                dim=0,
-            ),
-            dim=0,
+        p1, p2 = _natural_cubic_spline_minus_one_zero_plus_one(
+            log_prob_neg,
+            log_prob_zero,
+            log_prob_pos,
+            (Z0[idx] + shift[idx].detach()) / per_alpha_value_near_zero_tolerance[idx],
         )
+        log_prob[idx] = torch.where(Z[idx] < 0, p1, p2)
 
     return log_prob
 
@@ -192,3 +193,33 @@ def _unsafe_stable_given_uniform_log_prob(V, alpha, beta, Z):
     log_prob = log_prob.clamp(min=MIN_LOG, max=MAX_LOG)
 
     return log_prob
+
+
+def _unsafe_alpha_stable_log_prob_at_zero(alpha, beta):
+    # Calculate log-probability at value of zero. This will fail if alpha is close to 1
+    inv_alpha = alpha.reciprocal()
+    half_pi = math.pi / 2
+    ha = half_pi * alpha
+    b = beta * ha.tan()
+    atan_b = b.atan()
+
+    term1_log = (inv_alpha * atan_b).cos().log()
+    term2_log = atan_b.cos().log() * inv_alpha
+    term3_log = torch.lgamma(1 + inv_alpha)
+
+    log_prob = term1_log - term2_log + term3_log - math.log(math.pi)
+
+    log_prob = log_prob.clamp(min=MIN_LOG, max=MAX_LOG)
+
+    return log_prob
+
+
+def _natural_cubic_spline_minus_one_zero_plus_one(y1, y2, y3, x):
+    sum_y = y1 + y3 - 2 * y2
+    aux_y = y3 - y2
+    a = -0.75 * sum_y + 1.5 * aux_y
+    b = 1.5 * sum_y
+    c = 1.25 * sum_y - 0.5 * aux_y
+    f = -0.75 * sum_y - 0.5 * aux_y
+    common = y2 + a * x + b * x**2
+    return common + c * x**3, common + f * x**3
