@@ -109,7 +109,7 @@ def _unsafe_alpha_stable_log_prob_S0(alpha, beta, Z):
 
     # Find near zero values
     per_alpha_value_near_zero_tolerance = (
-        value_near_zero_tolerance * alpha / (1 - alpha).abs()
+        value_near_zero_tolerance * _unsafe_alpha_stable_log_prob_at_zero(alpha, beta).exp().reciprocal()
     )
     idx = Z.abs() < per_alpha_value_near_zero_tolerance
 
@@ -188,6 +188,25 @@ def _unsafe_stable_given_uniform_log_prob(V, alpha, beta, Z):
 
     # Infinite W means zero-probability
     log_prob = torch.where(W == torch.inf, -torch.inf, log_prob)
+
+    log_prob = log_prob.clamp(min=MIN_LOG, max=MAX_LOG)
+
+    return log_prob
+
+
+def _unsafe_alpha_stable_log_prob_at_zero(alpha, beta):
+    # Calculate log-probability at value of zero. This will fail if alpha is close to 1
+    inv_alpha = alpha.reciprocal()
+    half_pi = math.pi / 2
+    ha = half_pi * alpha
+    b = beta * ha.tan()
+    atan_b = b.atan()
+
+    term1_log = (inv_alpha * atan_b).cos().log()
+    term2_log = atan_b.cos().log() * inv_alpha
+    term3_log = torch.lgamma(1 + inv_alpha)
+
+    log_prob = term1_log - term2_log + term3_log - math.log(math.pi)
 
     log_prob = log_prob.clamp(min=MIN_LOG, max=MAX_LOG)
 
