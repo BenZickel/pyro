@@ -6,7 +6,8 @@ from functools import partial
 
 import torch
 
-value_near_zero_tolerance = 0.01
+value_near_zero_tolerance_alpha = 0.01
+value_near_zero_tolerance_density = 0.1
 alpha_near_one_tolerance = 0.05
 
 
@@ -109,11 +110,10 @@ def _unsafe_alpha_stable_log_prob_S0(alpha, beta, Z):
 
     # Find near zero values
     per_param_value_near_zero_tolerance = (
-        value_near_zero_tolerance
-        * _unsafe_alpha_stable_log_prob_at_zero(alpha, beta)
-        .exp()
-        .reciprocal()
-        .clamp(max=(alpha - 1).abs().reciprocal())
+        value_near_zero_tolerance_alpha * alpha / (1 - alpha).abs()
+    ).clamp(
+        max=value_near_zero_tolerance_density
+        * _unsafe_alpha_stable_log_prob_at_zero(alpha, 0).exp().reciprocal()
     )
     idx = Z.abs() < per_param_value_near_zero_tolerance
 
