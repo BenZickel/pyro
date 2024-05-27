@@ -108,23 +108,27 @@ def _unsafe_alpha_stable_log_prob_S0(alpha, beta, Z):
     Z = Z + beta * (math.pi / 2 * alpha).tan()
 
     # Find near zero values
-    per_alpha_value_near_zero_tolerance = (
-        value_near_zero_tolerance * _unsafe_alpha_stable_log_prob_at_zero(alpha, beta).exp().reciprocal()
+    per_param_value_near_zero_tolerance = (
+        value_near_zero_tolerance
+        * _unsafe_alpha_stable_log_prob_at_zero(alpha, beta)
+        .exp()
+        .reciprocal()
+        .clamp(max=(alpha - 1).abs().reciprocal())
     )
-    idx = Z.abs() < per_alpha_value_near_zero_tolerance
+    idx = Z.abs() < per_param_value_near_zero_tolerance
 
     # Calculate log-prob at safe values
     log_prob = _unsafe_stable_log_prob(
-        alpha, beta, torch.where(idx, per_alpha_value_near_zero_tolerance, Z)
+        alpha, beta, torch.where(idx, per_param_value_near_zero_tolerance, Z)
     )
 
     # Handle near zero values by interpolation
     if idx.any():
         log_prob_pos = log_prob[idx]
         log_prob_neg = _unsafe_stable_log_prob(
-            alpha[idx], beta[idx], -per_alpha_value_near_zero_tolerance[idx]
+            alpha[idx], beta[idx], -per_param_value_near_zero_tolerance[idx]
         )
-        weights = Z[idx] / (2 * per_alpha_value_near_zero_tolerance[idx]) + 0.5
+        weights = Z[idx] / (2 * per_param_value_near_zero_tolerance[idx]) + 0.5
         log_prob[idx] = torch.logsumexp(
             torch.stack(
                 (log_prob_pos + weights.log(), log_prob_neg + (1 - weights).log()),
