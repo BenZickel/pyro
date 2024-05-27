@@ -109,8 +109,9 @@ def _unsafe_alpha_stable_log_prob_S0(alpha, beta, Z0):
     Z = Z0 + shift
 
     # Find near zero values
+    zero_value_log_prob = _unsafe_alpha_stable_log_prob_at_zero(alpha, beta)
     per_alpha_value_near_zero_tolerance = (
-        value_near_zero_tolerance * alpha / (1 - alpha).abs()
+        value_near_zero_tolerance * zero_value_log_prob.exp().reciprocal()
     )
     idx = Z.abs() < per_alpha_value_near_zero_tolerance
 
@@ -122,7 +123,7 @@ def _unsafe_alpha_stable_log_prob_S0(alpha, beta, Z0):
     # Handle near zero values by interpolation
     if idx.any():
         log_prob_pos = log_prob[idx]
-        log_prob_zero = _unsafe_alpha_stable_log_prob_at_zero(alpha[idx], beta[idx])
+        log_prob_zero = zero_value_log_prob[idx]
         log_prob_neg = _unsafe_stable_log_prob(
             alpha[idx], beta[idx], -per_alpha_value_near_zero_tolerance[idx]
         )
@@ -130,7 +131,7 @@ def _unsafe_alpha_stable_log_prob_S0(alpha, beta, Z0):
             log_prob_neg,
             log_prob_zero,
             log_prob_pos,
-            (Z0[idx] + shift[idx].detach()) / per_alpha_value_near_zero_tolerance[idx],
+            Z[idx] / per_alpha_value_near_zero_tolerance[idx],
         )
         log_prob[idx] = torch.where(Z[idx] < 0, p1, p2)
 
