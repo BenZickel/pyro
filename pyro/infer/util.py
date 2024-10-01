@@ -378,3 +378,16 @@ class CloneMixin:
             else:
                 retval[field_name] = value.clone()
         return self.__class__(**retval)
+
+
+class NamedTupleCloneMixIn:
+    def clone(self):
+        retval = list()
+        for value in self:
+            if isinstance(value, dict):
+                retval.append(dict())
+                for key in value:
+                    retval[-1][key] = value[key].clone()
+            else:
+                retval.append(value.clone())
+        return self.__class__(*retval)

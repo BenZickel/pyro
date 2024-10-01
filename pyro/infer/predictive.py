@@ -5,6 +5,7 @@ import warnings
 from dataclasses import dataclass, fields
 from functools import reduce
 from typing import Callable, List, Union
+from collections import namedtuple
 
 import torch
 
@@ -12,7 +13,7 @@ import pyro
 import pyro.poutine as poutine
 from pyro.infer.autoguide.initialization import InitMessenger, init_to_sample
 from pyro.infer.importance import LogWeightsMixin
-from pyro.infer.util import CloneMixin, plate_log_prob_sum
+from pyro.infer.util import CloneMixin, NamedTupleCloneMixIn, plate_log_prob_sum
 from pyro.poutine.trace_struct import Trace
 from pyro.poutine.util import prune_subsample_sites
 
@@ -322,7 +323,7 @@ class Predictive(torch.nn.Module):
             model_kwargs=kwargs,
         ).trace
 
-
+'''
 @dataclass(frozen=True, eq=False)
 class WeighedPredictiveResults(LogWeightsMixin, CloneMixin):
     """
@@ -333,6 +334,10 @@ class WeighedPredictiveResults(LogWeightsMixin, CloneMixin):
     log_weights: torch.Tensor
     guide_log_prob: torch.Tensor
     model_log_prob: torch.Tensor
+'''
+class WeighedPredictiveResults(namedtuple('WeighedPredictiveResults',
+                                          ['samples', 'log_weights', 'guide_log_prob', 'model_log_prob']), NamedTupleCloneMixIn):
+    pass
 
 
 class WeighedPredictive(Predictive):
@@ -584,10 +589,7 @@ class MHResampler(torch.nn.Module):
                 ).exp()
                 idx = torch.rand(*prob.shape) <= prob
                 self.transition_count[idx] += 1
-                for field_desc in fields(self.samples):
-                    field, new_field = getattr(self.samples, field_desc.name), getattr(
-                        new_samples, field_desc.name
-                    )
+                for field, new_field in zip(self.samples, new_samples):
                     if isinstance(field, dict):
                         for key in field:
                             field[key][idx] = new_field[key][idx]
